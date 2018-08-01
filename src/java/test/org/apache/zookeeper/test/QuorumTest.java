@@ -246,6 +246,52 @@ public class QuorumTest extends ZKTestCase {
     }
 
     /**
+     * Make sure the previous connection closed after session move within
+     * multiop.
+     *
+     * @throws IOException
+     * @throws InterruptedException
+     * @throws KeeperException
+     */
+    @Test
+    public void testSessionMovedWithMultiOp() throws Exception {
+        String hostPorts[] = qb.hostPort.split(",");
+        DisconnectableZooKeeper zk = new DisconnectableZooKeeper(hostPorts[0],
+                ClientBase.CONNECTION_TIMEOUT, new Watcher() {
+            public void process(WatchedEvent event) {
+            }});
+        zk.multi(Arrays.asList(
+            Op.create("/testSessionMovedWithMultiOp", new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL)
+        ));
+
+        // session moved to the next server
+        ZooKeeper zknew = new ZooKeeper(hostPorts[1],
+            ClientBase.CONNECTION_TIMEOUT,
+            new Watcher() {public void process(WatchedEvent event) {
+            }},
+            zk.getSessionId(),
+            zk.getSessionPasswd());
+        zknew.multi(Arrays.asList(
+            Op.create("/testSessionMovedWithMultiOp-1", new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL)
+        ));
+
+        // try to issue the multi op again from the old connection
+        // expect to have ConnectionLossException instead of keep
+        // getting SessionMovedException
+        try {
+            zk.multi(Arrays.asList(
+                Op.create("/testSessionMovedWithMultiOp-Failed",
+                    new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL)
+            ));
+            Assert.fail("Should have lost the connection");
+        } catch (KeeperException.ConnectionLossException e) {
+        }
+
+        zk.close();
+        zknew.close();
+    }
+
+    /**
      * Connect to two different servers with two different handles using the same session and
      * make sure we cannot do any changes.
      */
@@ -295,8 +341,8 @@ public class QuorumTest extends ZKTestCase {
         zk.close();
     }
 
-    /** 
-     * See ZOOKEEPER-790 for details 
+    /**
+     * See ZOOKEEPER-790 for details
      * */
     @Test
     public void testFollowersStartAfterLeader() throws Exception {
@@ -310,10 +356,10 @@ public class QuorumTest extends ZKTestCase {
 
         // break the quorum
         qu.shutdown(index);
-        
+
         // try to reestablish the quorum
         qu.start(index);
-        
+
         // Connect the client after services are restarted (otherwise we would get
         // SessionExpiredException as the previous local session was not persisted).
         ZooKeeper zk = new ZooKeeper(
@@ -321,98 +367,10 @@ public class QuorumTest extends ZKTestCase {
                 ClientBase.CONNECTION_TIMEOUT, watcher);
 
         try{
-            watcher.waitForConnected(CONNECTION_TIMEOUT);      
+            watcher.waitForConnected(CONNECTION_TIMEOUT);
         } catch(TimeoutException e) {
             Assert.fail("client could not connect to reestablished quorum: giving up after 30+ seconds.");
         }
-
-        zk.close();
-    }
-
-    /**
-     * Tests if closeSession can be logged before a leader gets established, which
-     * could lead to a locked-out follower (see ZOOKEEPER-790). 
-     * 
-     * The test works as follows. It has a client connecting to a follower f and
-     * sending batches of 1,000 updates. The goal is that f has a zxid higher than
-     * all other servers in the initial leader election. This way we can crash and
-     * recover the follower so that the follower believes it is the leader once it
-     * recovers (LE optimization: once a server receives a message from all other 
-     * servers, it picks a leader.
-     * 
-     * It also makes the session timeout very short so that we force the false 
-     * leader to close the session and write it to the log in the buggy code (before 
-     * ZOOKEEPER-790). Once f drops leadership and finds the current leader, its epoch
-     * is higher, and it rejects the leader. Now, if we prevent the leader from closing
-     * the session by only starting up (see Leader.lead()) once it obtains a quorum of 
-     * supporters, then f will find the current leader and support it because it won't
-     * have a highe epoch.
-     * 
-     */
-    @Test
-    public void testNoLogBeforeLeaderEstablishment () throws Exception {
-        final Semaphore sem = new Semaphore(0);
-
-        qu = new QuorumUtil(2, 10);
-        qu.startQuorum();
-
-        int index = 1;
-        while(qu.getPeer(index).peer.leader == null)
-            index++;
-
-        Leader leader = qu.getPeer(index).peer.leader;
-
-        Assert.assertNotNull(leader);
-
-        /*
-         * Reusing the index variable to select a follower to connect to
-         */
-        index = (index == 1) ? 2 : 1;
-
-        ZooKeeper zk = new DisconnectableZooKeeper(
-                "127.0.0.1:" + qu.getPeer(index).peer.getClientPort(),
-                ClientBase.CONNECTION_TIMEOUT, new Watcher() {
-            public void process(WatchedEvent event) { }
-          });
-
-        zk.create("/blah", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);      
-
-        for(int i = 0; i < 50000; i++) {
-            zk.setData("/blah", new byte[0], -1, new AsyncCallback.StatCallback() {
-                public void processResult(int rc, String path, Object ctx,
-                        Stat stat) {
-                    counter++;
-                    if (rc != 0) {
-                        errors++;
-                    }
-                    if(counter == 20000){
-                        sem.release();
-                    }
-                }
-            }, null);
-
-            if(i == 5000){
-                qu.shutdown(index);
-                LOG.info("Shutting down s1");
-            }
-            if(i == 12000){
-                qu.start(index);
-                LOG.info("Setting up server: " + index);
-            }
-            if((i % 1000) == 0){
-                Thread.sleep(500);
-            }
-        }
-
-        // Wait until all updates return
-        sem.tryAcquire(15, TimeUnit.SECONDS);
-
-        // Verify that server is following and has the same epoch as the leader
-        Assert.assertTrue("Not following", qu.getPeer(index).peer.follower != null);
-        long epochF = (qu.getPeer(index).peer.getActiveServer().getZxid() >> 32L);
-        long epochL = (leader.getEpoch() >> 32L);
-        Assert.assertTrue("Zxid: " + qu.getPeer(index).peer.getActiveServer().getZxid() + 
-                "Current epoch: " + epochF, epochF == epochL);
 
         zk.close();
     }
@@ -422,7 +380,7 @@ public class QuorumTest extends ZKTestCase {
     /**
      * Tests if a multiop submitted to a non-leader propagates to the leader properly
      * (see ZOOKEEPER-1124).
-     * 
+     *
      * The test works as follows. It has a client connect to a follower and submit a multiop
      * to the follower. It then verifies that the multiop successfully gets committed by the leader.
      *

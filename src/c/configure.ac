@@ -41,7 +41,7 @@ if test "$CALLER" = "ANT" ; then
 CPPUNIT_CFLAGS="$CPPUNIT_CFLAGS -DZKSERVER_CMD=\"\\\"${base_dir}/src/c/tests/zkServer.sh\\\"\""
 else
 CPPUNIT_CFLAGS="$CPPUNIT_CFLAGS -DZKSERVER_CMD=\"\\\"./tests/zkServer.sh\\\"\""
-AC_CHECK_FILES([generated/zookeeper.jute.c generated/zookeeper.jute.h],[],
+AC_CHECK_FILES([$srcdir/generated/zookeeper.jute.c $srcdir/generated/zookeeper.jute.h],[],
     [AC_MSG_ERROR([jute files are missing! Please run "ant compile_jute" while in the zookeeper top level directory.])
 ])
 fi
@@ -85,6 +85,12 @@ else
         CXXFLAGS="-g -O2"
     fi
 fi
+
+# Check whether to enable gcov (coverage test)
+AC_ARG_ENABLE(gcov, [AS_HELP_STRING([--enable-gcov],[enable coverage test])])
+AC_MSG_CHECKING([whether to enable gcov])
+AS_IF([test "x${enable_gcov}" = "xyes"],AC_MSG_RESULT([yes]),AC_MSG_RESULT([no]))
+AM_CONDITIONAL([ENABLEGCOV],[test "x${enable_gcov}" = "xyes"])
 
 AC_ARG_WITH([syncapi],
  [AS_HELP_STRING([--with-syncapi],[build with support for SyncAPI [default=yes]])],
@@ -130,17 +136,57 @@ main()
  else
    exit(0);
 }
-], AC_MSG_RESULT(yes) 
-   ipv6=yes, 
-   AC_MSG_RESULT(no) 
-   ipv6=no, 
-   AC_MSG_RESULT(no) 
+], AC_MSG_RESULT(yes)
+   ipv6=yes,
+   AC_MSG_RESULT(no)
+   ipv6=no,
+   AC_MSG_RESULT(no)
    ipv6=no)
 
 if test x"$ipv6" = xyes; then
   USEIPV6="-DZOO_IPV6_ENABLED"
   AC_SUBST(USEIPV6)
 fi
+
+# use SOCK_CLOEXEC if available and wanted
+AC_ARG_WITH([sock_cloexec],
+[AS_HELP_STRING([--with-sock-cloexec],[build with SOCK_CLOEXEC flag set on the connections])],
+[],[with_sock_cloexec=no])
+
+AC_MSG_CHECKING([whether SOCK_CLOEXEC is available])
+
+AC_TRY_RUN([ /* is SOCK_CLOEXEC available ? */
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <stdlib.h>
+main()
+{
+#ifdef SOCK_CLOEXEC
+  exit(0);
+#else
+  exit(1);
+#endif
+}
+], AC_MSG_RESULT(yes)
+   has_sock_cloexec=yes,
+   AC_MSG_RESULT(no)
+   has_sock_cloexec=no,
+   AC_MSG_RESULT(no)
+   has_sock_cloexec=no)
+
+if test "x$with_sock_cloexec" != xno && test "x$has_sock_cloexec" = xno; then
+  AC_MSG_WARN([cannot use SOCK_CLOEXEC -- SOCK_CLOEXEC undefined on this platform])
+  with_sock_cloexec=no
+fi
+
+if test "x$with_sock_cloexec" != xno; then
+AC_MSG_NOTICE([building with SOCK_CLOEXEC])
+else
+AC_MSG_NOTICE([building without SOCK_CLOEXEC])
+fi
+
+AS_IF([test x"$with_sock_cloexec" != xno], [AC_DEFINE([SOCK_CLOEXEC_ENABLED], [1], [Define to 1, if SOCK_CLOEXEC is defined and wanted])])
+AM_CONDITIONAL([SOCK_CLOEXEC_ENABLED],[test "x$with_sock_cloexec" != xno])
 
 # Determine which libraries we need to use clock_gettime
 saved_LIBS="$LIBS"

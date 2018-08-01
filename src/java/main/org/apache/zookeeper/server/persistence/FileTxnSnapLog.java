@@ -19,6 +19,7 @@
 package org.apache.zookeeper.server.persistence;
 
 import java.io.File;
+import java.io.FilenameFilter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
@@ -32,6 +33,7 @@ import org.apache.zookeeper.ZooDefs.OpCode;
 import org.apache.zookeeper.server.DataTree;
 import org.apache.zookeeper.server.DataTree.ProcessTxnResult;
 import org.apache.zookeeper.server.Request;
+import org.apache.zookeeper.server.ServerStats;
 import org.apache.zookeeper.server.ZooTrace;
 import org.apache.zookeeper.server.persistence.TxnLog.TxnIterator;
 import org.apache.zookeeper.txn.CreateSessionTxn;
@@ -48,12 +50,12 @@ import org.slf4j.LoggerFactory;
 public class FileTxnSnapLog {
     //the directory containing the
     //the transaction logs
-    private final File dataDir;
+    final File dataDir;
     //the directory containing the
     //the snapshot directory
-    private final File snapDir;
-    private TxnLog txnLog;
-    private SnapShot snapLog;
+    final File snapDir;
+    TxnLog txnLog;
+    SnapShot snapLog;
     private final boolean autoCreateDB;
     public final static int VERSION = 2;
     public final static String version = "version-";
@@ -136,11 +138,46 @@ public class FileTxnSnapLog {
             throw new DatadirException("Cannot write to snap directory " + this.snapDir);
         }
 
+        // check content of transaction log and snapshot dirs if they are two different directories
+        // See ZOOKEEPER-2967 for more details
+        if(!this.dataDir.getPath().equals(this.snapDir.getPath())){
+            checkLogDir();
+            checkSnapDir();
+        }
+
         txnLog = new FileTxnLog(this.dataDir);
         snapLog = new FileSnap(this.snapDir);
 
         autoCreateDB = Boolean.parseBoolean(System.getProperty(ZOOKEEPER_DB_AUTOCREATE,
                 ZOOKEEPER_DB_AUTOCREATE_DEFAULT));
+    }
+
+    public void setServerStats(ServerStats serverStats) {
+        txnLog.setServerStats(serverStats);
+    }
+
+    private void checkLogDir() throws LogDirContentCheckException {
+        File[] files = this.dataDir.listFiles(new FilenameFilter() {
+            @Override
+            public boolean accept(File dir, String name) {
+                return Util.isSnapshotFileName(name);
+            }
+        });
+        if (files != null && files.length > 0) {
+            throw new LogDirContentCheckException("Log directory has snapshot files. Check if dataLogDir and dataDir configuration is correct.");
+        }
+    }
+
+    private void checkSnapDir() throws SnapDirContentCheckException {
+        File[] files = this.snapDir.listFiles(new FilenameFilter() {
+            @Override
+            public boolean accept(File dir, String name) {
+                return Util.isLogFileName(name);
+            }
+        });
+        if (files != null && files.length > 0) {
+            throw new SnapDirContentCheckException("Snapshot directory has log files. Check if dataLogDir and dataDir configuration is correct.");
+        }
     }
 
     /**
@@ -173,7 +210,7 @@ public class FileTxnSnapLog {
      * @throws IOException
      */
     public long restore(DataTree dt, Map<Long, Integer> sessions,
-            PlayBackListener listener) throws IOException {
+                        PlayBackListener listener) throws IOException {
         long deserializeResult = snapLog.deserialize(dt, sessions);
         FileTxnLog txnLog = new FileTxnLog(dataDir);
         boolean trustEmptyDB;
@@ -207,6 +244,22 @@ public class FileTxnSnapLog {
                 return -1L;
             }
         }
+        return fastForwardFromEdits(dt, sessions, listener);
+    }
+
+    /**
+     * This function will fast forward the server database to have the latest
+     * transactions in it.  This is the same as restore, but only reads from
+     * the transaction logs and not restores from a snapshot.
+     * @param dt the datatree to write transactions to.
+     * @param sessions the sessions to be restored.
+     * @param listener the playback listener to run on the
+     * database transactions.
+     * @return the highest zxid restored.
+     * @throws IOException
+     */
+    public long fastForwardFromEdits(DataTree dt, Map<Long, Integer> sessions,
+                                     PlayBackListener listener) throws IOException {
         TxnIterator itr = txnLog.read(dt.lastProcessedZxid+1);
         long highestZxid = dt.lastProcessedZxid;
         TxnHeader hdr;
@@ -346,8 +399,30 @@ public class FileTxnSnapLog {
         File snapshotFile = new File(snapDir, Util.makeSnapshotName(lastZxid));
         LOG.info("Snapshotting: 0x{} to {}", Long.toHexString(lastZxid),
                 snapshotFile);
-        snapLog.serialize(dataTree, sessionsWithTimeouts, snapshotFile, syncSnap);
-
+        try {
+            snapLog.serialize(dataTree, sessionsWithTimeouts, snapshotFile, syncSnap);
+        } catch (IOException e) {
+            if (snapshotFile.length() == 0) {
+                /* This may be caused by a full disk. In such a case, the server
+                 * will get stuck in a loop where it tries to write a snapshot
+                 * out to disk, and ends up creating an empty file instead.
+                 * Doing so will eventually result in valid snapshots being
+                 * removed during cleanup. */
+                if (snapshotFile.delete()) {
+                    LOG.info("Deleted empty snapshot file: " +
+                             snapshotFile.getAbsolutePath());
+                } else {
+                    LOG.warn("Could not delete empty snapshot file: " +
+                             snapshotFile.getAbsolutePath());
+                }
+            } else {
+                /* Something else went wrong when writing the snapshot out to
+                 * disk. If this snapshot file is invalid, when restarting,
+                 * ZooKeeper will skip it, and find the last known good snapshot
+                 * instead. */
+            }
+            throw e;
+        }
     }
 
     /**
@@ -463,6 +538,20 @@ public class FileTxnSnapLog {
         }
         public DatadirException(String msg, Exception e) {
             super(msg, e);
+        }
+    }
+
+    @SuppressWarnings("serial")
+    public static class LogDirContentCheckException extends DatadirException {
+        public LogDirContentCheckException(String msg) {
+            super(msg);
+        }
+    }
+
+    @SuppressWarnings("serial")
+    public static class SnapDirContentCheckException extends DatadirException {
+        public SnapDirContentCheckException(String msg) {
+            super(msg);
         }
     }
 }

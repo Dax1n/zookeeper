@@ -18,7 +18,7 @@
 
 package org.apache.zookeeper.server;
 
-import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.Collection;
@@ -32,7 +32,6 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
 
-import org.apache.jute.BinaryOutputArchive;
 import org.apache.jute.InputArchive;
 import org.apache.jute.OutputArchive;
 import org.apache.jute.Record;
@@ -225,6 +224,11 @@ public class ZKDatabase {
         return sessionsWithTimeouts;
     }
 
+    private final PlayBackListener commitProposalPlaybackListener = new PlayBackListener() {
+        public void onTxnLoaded(TxnHeader hdr, Record txn){
+            addCommittedProposal(hdr, txn);
+        }
+    };
 
     /**
      * load the database from the disk onto memory and also add
@@ -233,16 +237,25 @@ public class ZKDatabase {
      * @throws IOException
      */
     public long loadDataBase() throws IOException {
-        PlayBackListener listener=new PlayBackListener(){
-            public void onTxnLoaded(TxnHeader hdr,Record txn){
-                Request r = new Request(0, hdr.getCxid(),hdr.getType(), hdr, txn, hdr.getZxid());
-                addCommittedProposal(r);
-            }
-        };
-
-        long zxid = snapLog.restore(dataTree,sessionsWithTimeouts,listener);
+        long zxid = snapLog.restore(dataTree, sessionsWithTimeouts, commitProposalPlaybackListener);
         initialized = true;
         return zxid;
+    }
+
+    /**
+     * Fast forward the database adding transactions from the committed log into memory.
+     * @return the last valid zxid.
+     * @throws IOException
+     */
+    public long fastForwardDataBase() throws IOException {
+        long zxid = snapLog.fastForwardFromEdits(dataTree, sessionsWithTimeouts, commitProposalPlaybackListener);
+        initialized = true;
+        return zxid;
+    }
+
+    private void addCommittedProposal(TxnHeader hdr, Record txn) {
+        Request r = new Request(0, hdr.getCxid(), hdr.getType(), hdr, txn, hdr.getZxid());
+        addCommittedProposal(r);
     }
 
     /**
@@ -264,19 +277,8 @@ public class ZKDatabase {
                 maxCommittedLog = request.zxid;
             }
 
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            BinaryOutputArchive boa = BinaryOutputArchive.getArchive(baos);
-            try {
-                request.getHdr().serialize(boa, "hdr");
-                if (request.getTxn() != null) {
-                    request.getTxn().serialize(boa, "txn");
-                }
-                baos.close();
-            } catch (IOException e) {
-                LOG.error("This really should be impossible", e);
-            }
-            QuorumPacket pp = new QuorumPacket(Leader.PROPOSAL, request.zxid,
-                    baos.toByteArray(), null);
+            byte[] data = SerializeUtils.serializeRequest(request);
+            QuorumPacket pp = new QuorumPacket(Leader.PROPOSAL, request.zxid, data, null);
             Proposal p = new Proposal();
             p.packet = pp;
             p.request = request;
@@ -301,7 +303,10 @@ public class ZKDatabase {
     public long calculateTxnLogSizeLimit() {
         long snapSize = 0;
         try {
-            snapSize = snapLog.findMostRecentSnapshot().length();
+            File snapFile = snapLog.findMostRecentSnapshot();
+            if (snapFile != null) {
+                snapSize = snapFile.length();
+            }
         } catch (IOException e) {
             LOG.error("Unable to get size of most recent snapshot");
         }

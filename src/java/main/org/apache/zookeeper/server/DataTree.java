@@ -120,7 +120,7 @@ public class DataTree {
             .substring(procZookeeper.length() + 1);
 
     /**
-     * the path trie that keeps track fo the quota nodes in this datatree
+     * the path trie that keeps track of the quota nodes in this datatree
      */
     private final PathTrie pTrie = new PathTrie();
 
@@ -812,7 +812,7 @@ public class DataTree {
                             createTtlTxn.getPath(),
                             createTtlTxn.getData(),
                             createTtlTxn.getAcl(),
-                            EphemeralType.ttlToEphemeralOwner(createTtlTxn.getTtl()),
+                            EphemeralType.TTL.toEphemeralOwner(createTtlTxn.getTtl()),
                             createTtlTxn.getParentCVersion(),
                             header.getZxid(), header.getTime(), stat);
                     rc.stat = stat;

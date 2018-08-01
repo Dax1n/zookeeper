@@ -74,6 +74,10 @@ public class MonitorCommand extends AbstractFourLetterCommand {
             print("followers", leader.getLearners().size());
             print("synced_followers", leader.getForwardingFollowers().size());
             print("pending_syncs", leader.getNumPendingSyncs());
+
+            print("last_proposal_size", leader.getProposalStats().getLastBufferSize());
+            print("max_proposal_size", leader.getProposalStats().getMaxBufferSize());
+            print("min_proposal_size", leader.getProposalStats().getMinBufferSize());
         }
     }
 
